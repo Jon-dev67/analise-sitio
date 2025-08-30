@@ -1,147 +1,257 @@
 import streamlit as st
 import pandas as pd
-import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
 import requests
-import plotly.express as px
 import urllib.parse
+from datetime import date, datetime
+from io import BytesIO
 
 # ================================
 # CONFIGURAÇÕES INICIAIS
 # ================================
 st.set_page_config(
-    page_title="🌱 Painel Integrado de Produção",
+    page_title="🌱 Gerenciador de Produção",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+plt.style.use("dark_background")
 
-st.title("🌱 Painel Integrado de Produção")
-st.write("Ferramenta para acompanhar **fenologia, adubação, colheita e clima**.")
-
-# ================================
-# 1. DEFINIÇÃO DOS ESTÁGIOS FENOLÓGICOS
-# ================================
-st.sidebar.header("⚙️ Configurações")
-
-st.subheader("📊 Curva de absorção de nutrientes (adubo por estágio)")
-
-num_estagios = st.sidebar.number_input("Quantos estágios fenológicos?", min_value=1, max_value=10, value=4)
-estagios = {}
-for i in range(num_estagios):
-    nome = st.sidebar.text_input(f"Nome do estágio {i+1}", value=f"Estágio {i+1}")
-    dias = st.sidebar.text_input(f"Intervalo de dias do estágio {i+1}", value=f"{i*20}-{(i+1)*20}")
-    adubo = st.sidebar.number_input(
-        f"Adubo recomendado (kg) para {nome}",
-        value=(i+1)*2,
-        step=1  # apenas inteiros
-    )
-    estagios[f"{dias} ({nome})"] = adubo
-
-fenologia_df = pd.DataFrame({"Estágio": list(estagios.keys()), "Adubo (kg)": list(estagios.values())})
-st.dataframe(fenologia_df, use_container_width=True)
-
-fig = px.line(fenologia_df, x="Estágio", y="Adubo (kg)", markers=True, title="Curva de absorção de nutrientes")
-st.plotly_chart(fig, use_container_width=True)
+ARQUIVO_DADOS = "colheitas.xlsx"
+API_KEY = "eef20bca4e6fb1ff14a81a3171de5cec"  # sua chave OpenWeather
+CIDADE_PADRAO = "Londrina"
 
 # ================================
-# 2. UPLOAD DE COLHEITAS
+# FUNÇÕES AUXILIARES
 # ================================
-st.subheader("📦 Registro de colheitas")
-uploaded_file = st.file_uploader("Envie a planilha de colheitas (xlsx)", type=["xlsx"])
-df_colheita = None
-if uploaded_file:
-    df_colheita = pd.read_excel(uploaded_file)
-
-    # Normalizar datas
-    if "Data" in df_colheita.columns:
-        df_colheita["Data"] = pd.to_datetime(df_colheita["Data"], errors="coerce")
-    
-    st.dataframe(df_colheita, use_container_width=True)
-
-    if "Data" in df_colheita.columns and "Caixas" in df_colheita.columns:
-        # Gráfico mais legível: barras
-        fig2 = px.bar(
-            df_colheita.sort_values("Data"), 
-            x="Data", 
-            y="Caixas", 
-            title="Produção ao longo do tempo",
-            labels={"Caixas": "Caixas colhidas", "Data": "Data"},
-            color="Caixas",
-            color_continuous_scale="Viridis"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-# ================================
-# 3. CLIMA - OpenWeather
-# ================================
-st.subheader("🌤️ Dados Climáticos")
-api_key = st.sidebar.text_input("API Key OpenWeather")
-city = st.sidebar.text_input("Cidade", value="Londrina")
-
-if api_key and city:
+def carregar_dados():
     try:
-        city_encoded = urllib.parse.quote(city)
-        # Clima atual
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={city_encoded}&appid={api_key}&units=metric&lang=pt_br"
-        response = requests.get(url)
-        data = response.json()
+        return pd.read_excel(ARQUIVO_DADOS)
+    except:
+        return pd.DataFrame(columns=["Data","Local","Produto","Caixas","Caixas de Segunda","Temperatura","Umidade","Chuva"])
 
-        if response.status_code != 200:
-            st.error(f"Erro API: {data.get('message', 'Não foi possível buscar o clima')}")
-        else:
-            temp = data["main"]["temp"]
-            hum = data["main"]["humidity"]
-            st.metric("🌡️ Temperatura atual", f"{temp} °C")
-            st.metric("💧 Umidade", f"{hum}%")
+def salvar_dados(df):
+    df.to_excel(ARQUIVO_DADOS, index=False)
 
-        # Previsão 5 dias
-        url_forecast = f"https://api.openweathermap.org/data/2.5/forecast?q={city_encoded}&appid={api_key}&units=metric&lang=pt_br"
-        forecast = requests.get(url_forecast).json()
+def normalizar_colunas(df):
+    df = df.copy()
+    col_map = {
+        "Estufa":"Local",
+        "Área":"Local",
+        "Produção":"Caixas",
+        "Primeira":"Caixas",
+        "Segunda":"Caixas de Segunda",
+        "Qtd":"Caixas",
+        "Quantidade":"Caixas",
+    }
+    df.rename(columns={c:col_map.get(c,c) for c in df.columns}, inplace=True)
+    if "Data" in df.columns:
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    for col in ["Caixas","Caixas de Segunda","Temperatura","Umidade","Chuva"]:
+        if col not in df.columns:
+            df[col] = 0
+    if "Local" not in df.columns: df["Local"] = ""
+    if "Produto" not in df.columns: df["Produto"] = ""
+    return df
 
-        if forecast.get("cod") != "200":
-            st.warning(f"Erro na previsão: {forecast.get('message','')}")
-        else:
-            previsoes = []
-            for item in forecast["list"][:10]:  # próximas 10 entradas
-                previsoes.append({
-                    "Data": item["dt_txt"],
-                    "Temp (°C)": item["main"]["temp"],
-                    "Umidade (%)": item["main"]["humidity"]
-                })
-            previsao_df = pd.DataFrame(previsoes)
-            st.dataframe(previsao_df, use_container_width=True)
+def plot_bar(ax, x, y, df, cores, titulo, ylabel):
+    df.groupby(x)[y].sum().plot(kind="bar", ax=ax, color=cores, width=0.6)
+    ax.set_title(titulo, fontsize=14)
+    ax.set_ylabel(ylabel)
+    ax.grid(axis="y", linestyle="--", alpha=0.7)
+    for p in ax.patches:
+        ax.text(p.get_x() + p.get_width()/2, p.get_height() + 0.01*df[y].max(), 
+                f"{int(p.get_height())}", ha="center")
 
-            fig_forecast = px.line(previsao_df, x="Data", y="Temp (°C)", markers=True, title="Previsão de Temperatura (próximos dias)")
-            st.plotly_chart(fig_forecast, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"Erro de conexão: {e}")
+def clima_atual(cidade):
+    """Busca clima atual no OpenWeather"""
+    try:
+        city_encoded = urllib.parse.quote(cidade)
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={city_encoded}&appid={API_KEY}&units=metric&lang=pt_br"
+        r = requests.get(url)
+        data = r.json()
+        if r.status_code != 200:
+            return None
+        return {
+            "temp": data["main"]["temp"],
+            "umidade": data["main"]["humidity"],
+            "chuva": data.get("rain", {}).get("1h", 0)
+        }
+    except:
+        return None
 
 # ================================
-# 4. RELATÓRIOS E EFICIÊNCIA DE ADUBO
+# MENU PRINCIPAL
 # ================================
-st.subheader("📈 Relatórios e análises")
+st.sidebar.title("📌 Menu")
+pagina = st.sidebar.radio("Escolha a página:", ["Cadastro de Produção","Análise"])
 
-if df_colheita is not None:
-    total_caixas = df_colheita["Caixas"].sum()
-    total_adubo = sum(estagios.values())
-    eficiencia = None
+# ================================
+# PÁGINA CADASTRO
+# ================================
+if pagina == "Cadastro de Produção":
+    st.title("📝 Cadastro de Produção")
+    df = carregar_dados()
+    cidade = st.sidebar.text_input("🌍 Cidade para clima", value=CIDADE_PADRAO)
 
-    if total_adubo > 0:
-        eficiencia = total_caixas / total_adubo
+    with st.form("form_cadastro", clear_on_submit=True):
+        col1,col2,col3 = st.columns(3)
+        with col1:
+            data = st.date_input("Data", value=date.today())
+            local = st.text_input("Local/Estufa")
+        with col2:
+            produto = st.text_input("Produto")
+            caixas = st.number_input("Caixas (1ª)", min_value=0, step=1)
+        with col3:
+            caixas2 = st.number_input("Caixas (2ª)", min_value=0, step=1)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("📦 Total de Caixas Colhidas", total_caixas)
-    col2.metric("🧪 Total de Adubo Aplicado (kg)", total_adubo)
-    if eficiencia:
-        col3.metric("⚖️ Eficiência (Caixas/kg Adubo)", round(eficiencia, 2))
+        # Busca clima automático
+        clima = clima_atual(cidade)
+        if clima:
+            temperatura = clima["temp"]
+            umidade = clima["umidade"]
+            chuva = clima["chuva"]
+            st.info(f"Clima carregado: 🌡️ {temperatura}°C | 💧 {umidade}% | 🌧️ {chuva}mm")
+        else:
+            temperatura = st.number_input("Temperatura (°C)", min_value=0.0, step=0.1)
+            umidade = st.number_input("Umidade (%)", min_value=0.0, step=0.1)
+            chuva = st.number_input("Chuva (mm)", min_value=0.0, step=0.1)
 
-    # Relação adubo x produção
-    relacao_df = pd.DataFrame({
-        "Categoria": ["Produção (Caixas)", "Adubo (kg)"],
-        "Valor": [total_caixas, total_adubo]
-    })
-    fig_rel = px.bar(relacao_df, x="Categoria", y="Valor", title="Comparativo Produção x Adubo")
-    st.plotly_chart(fig_rel, use_container_width=True)
+        enviado = st.form_submit_button("Salvar Registro ✅")
+        if enviado:
+            novo = pd.DataFrame([{
+                "Data": pd.to_datetime(data),
+                "Local": local,
+                "Produto": produto,
+                "Caixas": caixas,
+                "Caixas de Segunda": caixas2,
+                "Temperatura": temperatura,
+                "Umidade": umidade,
+                "Chuva": chuva
+            }])
+            df = pd.concat([df, novo], ignore_index=True)
+            salvar_dados(df)
+            st.success("Registro salvo com sucesso!")
 
-else:
-    st.info("Envie uma planilha de colheita para gerar relatórios completos.")
+    if not df.empty:
+        st.markdown("### 📋 Registros já cadastrados")
+        st.dataframe(df.tail(10), use_container_width=True)
+
+# ================================
+# PÁGINA ANÁLISE
+# ================================
+if pagina == "Análise":
+    st.title("📊 Análise")
+    st.markdown("Escolha a fonte de dados:")
+    fonte = st.radio("Fonte de dados:", ["Usar dados cadastrados no app","Enviar um arquivo Excel"], horizontal=True)
+
+    df_raw = None
+    if fonte == "Usar dados cadastrados no app":
+        df_raw = carregar_dados()
+    else:
+        arquivo = st.file_uploader("Selecione um arquivo Excel", type=["xlsx","xls"])
+        if arquivo:
+            df_raw = pd.read_excel(arquivo)
+
+    if df_raw is None or df_raw.empty:
+        st.warning("Nenhum dado disponível.")
+        st.stop()
+
+    df_norm = normalizar_colunas(df_raw)
+
+    # FILTROS
+    st.sidebar.markdown("## 🔎 Filtros")
+    min_date = df_norm["Data"].min().date() if not df_norm["Data"].isna().all() else date.today()
+    max_date = df_norm["Data"].max().date() if not df_norm["Data"].isna().all() else date.today()
+    date_range = st.sidebar.date_input("Período", value=(min_date,max_date), min_value=min_date, max_value=max_date)
+
+    locais_all = sorted(df_norm["Local"].dropna().unique())
+    locais_sel = st.sidebar.multiselect("Local (todos se vazio)", locais_all, default=locais_all)
+
+    produtos_all = sorted(df_norm["Produto"].dropna().unique())
+    produtos_sel = st.sidebar.multiselect("Produto (todos se vazio)", produtos_all, default=produtos_all)
+
+    df_filt = df_norm.copy()
+    try:
+        start_date, end_date = date_range
+    except:
+        start_date = end_date = date_range
+    df_filt = df_filt[(df_filt["Data"] >= pd.to_datetime(start_date)) & (df_filt["Data"] <= pd.to_datetime(end_date))]
+
+    if locais_sel:
+        df_filt = df_filt[df_filt["Local"].isin(locais_sel)]
+    if produtos_sel:
+        df_filt = df_filt[df_filt["Produto"].isin(produtos_sel)]
+
+    if df_filt.empty:
+        st.warning("Nenhum dado após aplicar os filtros.")
+        st.stop()
+
+    df_filt["Total"] = df_filt["Caixas"] + df_filt["Caixas de Segunda"]
+
+    # KPIs
+    total = df_filt["Total"].sum()
+    media = df_filt["Total"].mean()
+    maior = df_filt["Total"].max()
+    menor = df_filt["Total"].min()
+
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Total de Caixas", f"{total:,.0f}")
+    k2.metric("Média por Registro", f"{media:,.2f}")
+    k3.metric("Máximo em 1 Registro", f"{maior:,.0f}")
+    k4.metric("Mínimo em 1 Registro", f"{menor:,.0f}")
+
+    st.markdown("---")
+
+    # GRÁFICOS
+    st.subheader("🏭 Total por Local")
+    fig, ax = plt.subplots(figsize=(12,6))
+    plot_bar(ax,"Local","Total",df_filt,cores=sns.color_palette("tab20", n_colors=len(df_filt["Local"].unique())),
+             titulo="Total de Caixas por Local", ylabel="Total de Caixas")
+    st.pyplot(fig)
+
+    st.subheader("🍅 Total por Produto")
+    fig, ax = plt.subplots(figsize=(10,5))
+    plot_bar(ax,"Produto","Total",df_filt,cores=sns.color_palette("Set2", n_colors=len(df_filt["Produto"].unique())),
+             titulo="Total de Caixas por Produto", ylabel="Total de Caixas")
+    st.pyplot(fig)
+
+    # Comparativo 1ª vs 2ª
+    st.subheader("📊 Comparativo Caixas 1ª vs 2ª")
+    for tipo in ["Local","Produto"]:
+        if tipo in df_filt.columns:
+            df_comp = df_filt.groupby(tipo)[["Caixas","Caixas de Segunda"]].sum().reset_index()
+            fig, ax = plt.subplots(figsize=(12,6))
+            df_comp.plot(kind="bar", x=tipo, ax=ax, width=0.7)
+            ax.set_ylabel("Quantidade de Caixas")
+            ax.set_title(f"Caixas de Primeira vs Segunda por {tipo}")
+            ax.grid(axis="y")
+            ax.legend(["Caixas (1ª)","Caixas de Segunda"])
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+            for p in ax.patches:
+                ax.text(p.get_x()+p.get_width()/2,p.get_height()+max(df_filt["Total"])*0.01,f'{int(p.get_height())}',ha='center')
+            st.pyplot(fig)
+
+    # Insights
+    st.markdown("---")
+    st.markdown("### 🧠 Insights")
+    total_segunda = df_filt["Caixas de Segunda"].sum()
+    pct_segunda = total_segunda/total*100 if total>0 else 0
+    st.markdown(f"- Taxa de Segunda Linha: {pct_segunda:.1f}% do total ({int(total_segunda):,} caixas de 2ª)")
+
+    media_prod = df_filt.groupby("Produto")["Total"].mean().sort_values(ascending=False)
+    if not media_prod.empty:
+        st.markdown(f"- Produto com maior média por registro: {media_prod.index[0]} ({media_prod.iloc[0]:.1f} caixas/registro)")
+
+    top_local_val = df_filt.groupby("Local")["Total"].sum().sort_values(ascending=False)
+    if not top_local_val.empty:
+        st.markdown(f"- Top local: {top_local_val.index[0]} ({int(top_local_val.iloc[0]):,} caixas)")
+
+    # Download filtrado
+    st.markdown("---")
+    buffer = BytesIO()
+    df_filt.to_excel(buffer, index=False, engine="openpyxl")
+    buffer.seek(0)
+    st.download_button("📥 Baixar dados filtrados em Excel", data=buffer,
+                       file_name="colheitas_filtradas.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
